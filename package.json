@@ -1,0 +1,18 @@
+{
+  "name": "forge",
+  "private": true,
+  "version": "2.0.0",
+  "description": "Forge: tasks, focus timer, board and an AI coach. Runs on your own Cloudflare account with your own keys.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "migrate": "node cloud/migrate.mjs",
+    "local": "node server.js"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.2.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.162.0"
+  }
+}

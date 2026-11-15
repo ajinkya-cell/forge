@@ -1,0 +1,15 @@
+{
+  // Forge on Cloudflare: one Worker serves the app and its API.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "forge",
+  "main": "cloud/worker.js",
+  "compatibility_date": "2026-10-01",
+  // The app itself (HTML, CSS, JS, icons). Anything that isn't a file here goes to the Worker.
+  "assets": { "directory": "./public" },
+  // Your files and images. Cloudflare creates this bucket in your account when you deploy,
+  // and hands the Worker its key: no password or address needed.
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "forge-files" }],
+  // Every night: a snapshot of your data into the bucket (backups/, last 30 kept).
+  "triggers": { "crons": ["17 3 * * *"] },
+  "observability": { "enabled": true }
+}

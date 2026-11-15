@@ -1,0 +1,7 @@
+# your data and keys never go to git
+data/
+.dev.vars
+.wrangler/
+node_modules/
+*.log
+.claude/
