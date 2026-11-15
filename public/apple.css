@@ -580,3 +580,4 @@ body.gated > :not(.gate):not(#toasts) { visibility: hidden; }
 }
 @media (max-width: 600px) and (display-mode: standalone) { .top-right .glass-btn[data-act="theme"] { display: none; } }
 @media (max-width: 600px) { .glass-pill.bd-tools { scrollbar-width: none; } .glass-pill.bd-tools::-webkit-scrollbar { display: none; } }
+.cx textarea { width: 100%; min-height: 64px; font: 14px/1.4 var(--code); resize: vertical; word-break: break-all; }

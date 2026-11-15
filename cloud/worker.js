@@ -1,7 +1,8 @@
 // Forge on Cloudflare. One Worker per person, on their own account:
 //   - the app's files come from ./public (Cloudflare serves them before this code runs)
 //   - data lives in that person's Neon database, one row per task / note / project
-//   - images, files, backups and the private key file live in their R2 bucket (env.FILES)
+//   - images and files live in their Cloudinary account, private, and are served only through this Worker
+//   - their keys, login lockouts and nightly backups live in Workers KV (env.KV), created on deploy
 //   - NVIDIA (coach) and Groq (voice) keys are read here and never sent to the browser
 // Login: a passphrase set as a Worker secret (PASSPHRASE), then a signed cookie for a year.
 import { neon, neonConfig } from '@neondatabase/serverless';
@@ -10,7 +11,7 @@ const DEFAULT_AI = { baseUrl: 'https://integrate.api.nvidia.com/v1', model: 'nvi
 const GROQ = 'https://api.groq.com/openai/v1';
 // Tried in order when the chosen NVIDIA model is down or slow. All of these returned real tool calls when probed (Nov 2026).
 const NVIDIA_FALLBACKS = ['nvidia/nemotron-3-ultra-550b-a55b', 'mistralai/mistral-large-4-1t-a52b', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', 'nvidia/nemotron-3.5-bolt-e4b', 'stepfun-ai/step-5-preview', 'minimaxai/minimax-m3.1-flash'];
-const CFG_KEY = '_private/config.json';
+const CFG_KEY = 'config';
 const COOKIE = 'forge_session';
 const YEAR = 365 * 24 * 3600;
 const KINDS = new Set(['projects', 'tasks', 'board', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat', 'kv']);
@@ -36,22 +37,22 @@ const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\
 const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0));
 const sha256 = async s => new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 
-/* ---------- the private settings file in the bucket ---------- */
+/* ---------- the private settings, in Workers KV ---------- */
 let cfgCache = null, cfgAt = 0;
 async function readCfg(env, fresh = false) {
-  if (!env.FILES) return { ...DEFAULT_AI };
+  if (!env.KV) return { ...DEFAULT_AI };
   if (!fresh && cfgCache && Date.now() - cfgAt < 5000) return cfgCache;
-  const o = await env.FILES.get(CFG_KEY);
-  cfgCache = { ...DEFAULT_AI, ...(o ? await o.json().catch(() => ({})) : {}) }; cfgAt = Date.now();
+  cfgCache = { ...DEFAULT_AI, ...((await env.KV.get(CFG_KEY, 'json').catch(() => null)) || {}) }; cfgAt = Date.now();
   return cfgCache;
 }
 async function writeCfg(env, patch) {
+  if (!env.KV) throw new Error('This Forge has no KV storage linked. Deploy again so Cloudflare creates it.');
   const c = { ...(await readCfg(env, true)), ...patch };
-  await env.FILES.put(CFG_KEY, JSON.stringify(c), { httpMetadata: { contentType: 'application/json' } });
+  await env.KV.put(CFG_KEY, JSON.stringify(c));
   cfgCache = c; cfgAt = Date.now();
   return c;
 }
-const setupState = (env, c) => ({ db: !!c.neonUrl, storage: !!env.FILES, coach: !!c.apiKey, voice: !!c.groqKey, done: !!c.setupDone && !!c.neonUrl && !!env.FILES });
+const setupState = (env, c) => ({ kv: !!env.KV, db: !!c.neonUrl, images: !!c.cloudinary, coach: !!c.apiKey, voice: !!c.groqKey, done: !!c.setupDone && !!c.neonUrl && !!c.cloudinary && !!env.KV });
 
 /* ---------- login ---------- */
 const hmacKey = env => crypto.subtle.importKey('raw', enc.encode('forge-session:' + env.PASSPHRASE), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
@@ -70,10 +71,9 @@ const cookie = (req, value, maxAge) => `${COOKIE}=${value}; Path=/; HttpOnly; Sa
 
 // 5 wrong passphrases from one address lock it out for 15 minutes.
 async function loginGate(env, ip) {
-  if (!env.FILES) return { key: null, rec: { n: 0, until: 0 } };
-  const key = '_private/login/' + b64u(await sha256(ip)).slice(0, 22) + '.json';
-  const o = await env.FILES.get(key);
-  return { key, rec: o ? await o.json().catch(() => ({ n: 0, until: 0 })) : { n: 0, until: 0 } };
+  if (!env.KV) return { key: null, rec: { n: 0, until: 0 } };
+  const key = 'login:' + b64u(await sha256(ip)).slice(0, 22);
+  return { key, rec: (await env.KV.get(key, 'json').catch(() => null)) || { n: 0, until: 0 } };
 }
 async function login(req, env) {
   if (!env.PASSPHRASE) return json(500, { error: 'This Forge has no passphrase yet. Set the PASSPHRASE secret in Cloudflare (see the README).' });
@@ -85,10 +85,10 @@ async function login(req, env) {
   if (!ok) {
     rec.n = (rec.n || 0) + 1;
     if (rec.n >= 5) { rec.n = 0; rec.until = Date.now() + 15 * 60000; }
-    if (key) await env.FILES.put(key, JSON.stringify(rec));
+    if (key) await env.KV.put(key, JSON.stringify(rec), { expirationTtl: 3600 });
     return json(401, { error: rec.until > Date.now() ? 'Too many wrong tries. Locked for 15 minutes.' : "That passphrase isn't right." });
   }
-  if (key && (rec.n || rec.until)) await env.FILES.delete(key);
+  if (key && (rec.n || rec.until)) await env.KV.delete(key);
   return json(200, { ok: true }, { 'Set-Cookie': cookie(req, await makeToken(env), YEAR) });
 }
 
@@ -154,16 +154,21 @@ async function sync(req, env) {
 /* ---------- setup: each step tests before it saves ---------- */
 async function setup(step, req, env) {
   const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
-  if (step === 'storage') {
-    if (!env.FILES) return json(400, { error: 'No storage bucket is linked to this Worker. Turn on R2 in your Cloudflare dashboard (R2 → Get started), then deploy again so the forge-files bucket is created.' });
+  if (!env.KV) return json(500, { error: 'This Forge has no KV storage linked, so it cannot keep your settings. Deploy it again so Cloudflare creates it.' });
+  if (step === 'images') {
+    const raw = String(body.cloudinary || '').trim(), c = raw ? parseCloudinary(raw) : (await readCfg(env)).cloudinary;
+    if (!c) return json(400, { error: raw ? "That doesn't look like Cloudinary details. Copy the line that starts with cloudinary:// from Cloudinary → Settings → API Keys." : 'Paste your Cloudinary details first.' });
     try {
-      const k = '_private/test-' + hex(4);
-      await env.FILES.put(k, 'ok'); const back = await (await env.FILES.get(k))?.text(); await env.FILES.delete(k);
-      if (back !== 'ok') throw new Error('read back the wrong thing');
-      return json(200, { ok: true });
-    } catch (e) { return json(502, { error: 'The bucket is linked but did not work: ' + e.message }); }
+      // a 1×1 test image: upload it privately, read it back through a signed link, delete it
+      const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='), ch => ch.charCodeAt(0));
+      const up = await cldUpload(c, png, 'image/png', 'test.png', 'image', 'forge/_setup-test-' + hex(4));
+      const back = await fetch(await cldUrl(c, 'image', up.version, up.public_id + '.' + up.format));
+      await cldDestroy(c, 'image', up.public_id).catch(() => { });
+      if (!back.ok) throw new Error(`uploaded, but could not read it back (${back.status})`);
+      if (raw) await writeCfg(env, { cloudinary: c });
+      return json(200, { ok: true, cloud: c.cloud });
+    } catch (e) { return json(400, { error: cldError(e) }); }
   }
-  if (!env.FILES) return json(400, { error: 'Storage comes first: no bucket is linked to this Worker yet.' });
   if (step === 'db') {
     const url = String(body.url || '').trim();
     if (!url) { const c = await readCfg(env); if (!c.neonUrl) return json(400, { error: 'Paste your Neon connection string first.' }); }
@@ -356,44 +361,87 @@ async function transcribe(req, env) {
   } catch { return json(502, { error: 'The voice service did not answer in time.' }); }
 }
 
-/* ---------- files ---------- */
+/* ---------- files: private in Cloudinary, served only through this Worker ---------- */
+// Accepts the "API environment variable" line, or the three values as Cloudinary lists them.
+function parseCloudinary(s) {
+  const m = /cloudinary:\/\/(\d{6,}):([\w-]{10,})@([\w-]+)/.exec(s);
+  if (m) return { key: m[1], secret: m[2], cloud: m[3] };
+  const cloud = /cloud\s*name\s*[:=]?\s*([\w-]+)/i.exec(s)?.[1], key = /api\s*key\s*[:=]?\s*(\d{6,})/i.exec(s)?.[1], secret = /api\s*secret\s*[:=]?\s*([\w-]{10,})/i.exec(s)?.[1];
+  return cloud && key && secret ? { cloud, key, secret } : null;
+}
+const sha1 = async s => new Uint8Array(await crypto.subtle.digest('SHA-1', enc.encode(s)));
+const cldSign = async (c, params) => [...await sha1(Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&') + c.secret)].map(b => b.toString(16).padStart(2, '0')).join('');
+// A signed delivery link for a private ("authenticated") file. Only this Worker can make one.
+async function cldUrl(c, rt, version, path) {
+  const p = `v${version}/${path}`;
+  return `https://res.cloudinary.com/${c.cloud}/${rt}/authenticated/s--${b64u(await sha1(p + c.secret)).slice(0, 8)}--/${p}`;
+}
+async function cldCall(c, rt, action, params, file) {
+  const fd = new FormData(), all = { ...params, timestamp: Math.floor(Date.now() / 1000) };
+  if (file) fd.append('file', file.blob, file.name);
+  for (const [k, v] of Object.entries(all)) fd.append(k, String(v));
+  fd.append('api_key', c.key); fd.append('signature', await cldSign(c, all));
+  const r = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(c.cloud)}/${rt}/${action}`, { method: 'POST', body: fd, signal: AbortSignal.timeout(90000) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(j?.error?.message || `Cloudinary answered ${r.status}`), { status: r.status });
+  return j;
+}
+const cldUpload = (c, body, type, name, rt, id) => cldCall(c, rt, 'upload', { public_id: id, type: 'authenticated' }, { blob: new Blob([body], { type }), name: name || 'file' });
+const cldDestroy = (c, rt, id) => cldCall(c, rt, 'destroy', { public_id: id, type: 'authenticated', invalidate: 'true' });
+function cldError(e) {
+  const m = String(e?.message || e);
+  if (e?.status === 401 || /invalid signature|unknown api key|api_key/i.test(m)) return 'Cloudinary refused those details. Copy the cloudinary:// line again from Settings → API Keys.';
+  if (e?.status === 404 || /cloud_name|not found/i.test(m)) return "Cloudinary doesn't know that cloud name. Copy the cloudinary:// line again.";
+  if (/too large/i.test(m)) return "That file is larger than Cloudinary's free plan allows (10 MB for images and files, 100 MB for video).";
+  if (/timed out|timeout|fetch failed/i.test(m)) return "Couldn't reach Cloudinary. Check your connection and try again.";
+  return 'Cloudinary: ' + m.slice(0, 200);
+}
+const kindOf = type => /^image\//.test(type) ? 'image' : /^(video|audio)\//.test(type) ? 'video' : 'raw';
+
 async function upload(req, env) {
-  if (!env.FILES) return json(500, { error: 'No storage bucket linked.' });
+  const c = (await readCfg(env)).cloudinary;
+  if (!c) return json(400, { error: 'Connect Cloudinary in Settings → Connections first.' });
   const type = (req.headers.get('content-type') || 'application/octet-stream').split(';')[0].trim().toLowerCase();
   let name = ''; try { name = decodeURIComponent(req.headers.get('x-filename') || ''); } catch { }
   name = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '').slice(0, 120);
   const ext = (name.toLowerCase().match(/\.[a-z0-9]{1,8}$/) || [])[0] || EXT_BY_TYPE[type] || '.bin';
-  const len = Number(req.headers.get('content-length') || 0);
-  if (len > 95e6) return json(413, { error: 'That file is too large (95 MB max).' });
+  const rt = kindOf(type), limit = rt === 'video' ? 100e6 : 10e6; // Cloudinary free plan
+  const tooBig = () => json(413, { error: `That file is too large: Cloudinary's free plan takes up to ${limit / 1e6} MB for ${rt === 'video' ? 'video and audio' : rt === 'image' ? 'images' : 'files'}.` });
+  if (Number(req.headers.get('content-length') || 0) > limit) return tooBig();
   const buf = await req.arrayBuffer();
-  if (buf.byteLength > 95e6) return json(413, { error: 'That file is too large (95 MB max).' });
-  const key = 'u/' + hex(8) + ext;
-  await env.FILES.put(key, buf, { httpMetadata: { contentType: type }, customMetadata: { name } });
-  return json(200, { url: '/files/' + key, name: name || key.slice(2), size: buf.byteLength, type });
+  if (buf.byteLength > limit) return tooBig();
+  const h = hex(8);
+  try {
+    // images and video are stored by id (Cloudinary keeps their format); other files keep their extension in the id
+    const up = await cldUpload(c, buf, type, name, rt, 'forge/' + h + (rt === 'raw' ? ext : ''));
+    const fext = rt === 'raw' ? ext : '.' + String(up.format || ext.slice(1)).toLowerCase();
+    return json(200, { url: `/files/${rt}/${up.version}/${h}${fext}`, name: name || h + fext, size: buf.byteLength, type });
+  } catch (e) { return json(502, { error: cldError(e) }); }
 }
-async function serveFile(key, env) {
-  if (!env.FILES || !/^u\/[\w-]+\.[a-z0-9]{1,8}$/i.test(key)) return json(404, { error: 'Not found' });
-  const o = await env.FILES.get(key);
-  if (!o) return json(404, { error: 'Not found' });
-  const type = o.httpMetadata?.contentType || MIME[key.split('.').pop().toLowerCase()] || 'application/octet-stream';
+async function serveFile(path, env) {
+  const m = /^(image|video|raw)\/(\d{1,12})\/([0-9a-f]{16})(\.[a-z0-9]{1,8})$/i.exec(path);
+  const c = m && (await readCfg(env)).cloudinary;
+  if (!c) return json(404, { error: 'Not found' });
+  const r = await fetch(await cldUrl(c, m[1], m[2], `forge/${m[3]}${m[4]}`), { cf: { cacheEverything: true, cacheTtl: 86400 } });
+  if (!r.ok) return json(r.status === 404 ? 404 : 502, { error: r.status === 404 ? 'Not found' : 'Cloudinary did not send the file.' });
+  const type = MIME[m[4].slice(1).toLowerCase()] || (r.headers.get('content-type') || 'application/octet-stream').split(';')[0];
   const inline = INLINE_OK.test(type);
-  return new Response(o.body, {
+  return new Response(r.body, {
     headers: {
       'Content-Type': inline ? type : 'application/octet-stream', 'Content-Security-Policy': 'sandbox', 'X-Content-Type-Options': 'nosniff',
-      'Cache-Control': 'private, max-age=31536000, immutable', ETag: o.httpEtag, ...(inline ? {} : { 'Content-Disposition': 'attachment' }),
+      'Cache-Control': 'private, max-age=31536000, immutable', ...(inline ? {} : { 'Content-Disposition': 'attachment' }),
     },
   });
 }
 
-/* ---------- nightly backup into the bucket ---------- */
+/* ---------- nightly backup into KV (last 30 kept) ---------- */
 async function backup(env) {
   const c = await readCfg(env, true);
-  if (!c.neonUrl || !env.FILES) return;
+  if (!c.neonUrl || !env.KV) return;
   const rows = await db(env, c.neonUrl).query('select kind, id, data, updated_at as u from items where not deleted order by kind, id');
-  await env.FILES.put(`backups/forge-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ at: Date.now(), rows }), { httpMetadata: { contentType: 'application/json' } });
-  const list = await env.FILES.list({ prefix: 'backups/' });
-  const old = list.objects.map(o => o.key).sort().slice(0, -30);
-  if (old.length) await env.FILES.delete(old);
+  await env.KV.put('backup:' + new Date().toISOString().slice(0, 10), JSON.stringify({ at: Date.now(), rows }));
+  const old = (await env.KV.list({ prefix: 'backup:' })).keys.map(k => k.name).sort().slice(0, -30);
+  for (const k of old) await env.KV.delete(k);
 }
 
 /* ---------- routes ---------- */
@@ -444,16 +492,13 @@ async function handle(req, env) {
   if (p === '/api/upload' && req.method === 'POST') return upload(req, env);
   if (p === '/api/stats') {
     const c = await readCfg(env);
-    let items = null, backups = 0, files = { count: 0, bytes: 0 };
+    let items = null, backups = 0, files = null;
     try { if (c.neonUrl) items = (await db(env, c.neonUrl).query('select count(*)::int as n from items where not deleted'))[0].n; } catch { }
-    if (env.FILES) {
-      let cur;
-      do {
-        const l = await env.FILES.list({ prefix: 'u/', cursor: cur });
-        l.objects.forEach(o => { files.count++; files.bytes += o.size; }); cur = l.truncated ? l.cursor : null;
-      } while (cur);
-      backups = (await env.FILES.list({ prefix: 'backups/' })).objects.length;
-    }
+    if (c.cloudinary) try {
+      const u = await (await fetch(`https://api.cloudinary.com/v1_1/${c.cloudinary.cloud}/usage`, { headers: { Authorization: 'Basic ' + btoa(c.cloudinary.key + ':' + c.cloudinary.secret) }, signal: AbortSignal.timeout(10000) })).json();
+      files = { count: u.resources ?? 0, bytes: u.storage?.usage ?? 0, credits: u.credits?.usage ?? 0, limit: u.credits?.limit ?? 25 };
+    } catch { }
+    if (env.KV) backups = (await env.KV.list({ prefix: 'backup:' })).keys.length;
     return json(200, { items, files, backups });
   }
   return json(404, { error: 'Not found' });

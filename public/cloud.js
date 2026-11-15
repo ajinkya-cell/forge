@@ -144,15 +144,16 @@ function cxCard(kind, inSetup) {
   const body = {
     db: `<p class="small">Where your tasks, notes and projects live. Make a free project at ${LINK('https://console.neon.tech', 'console.neon.tech')}, press <b>Connect</b>, and copy the connection string.</p>
       ${field('url', 'postgresql://…', 'Neon connection string')}`,
-    storage: `<p class="small">Your images and files, in the R2 bucket Cloudflare made for this Forge. Nothing to paste: this only checks that it works.</p>`,
+    images: `<p class="small">Where board images and files are kept, privately. Make a free account at ${LINK('https://cloudinary.com/users/register_free', 'cloudinary.com')} (no card), open ${LINK('https://console.cloudinary.com/settings/api-keys', 'Settings → API Keys')}, and copy the line that starts with <code>cloudinary://</code>.</p>
+      <textarea name="cloudinary" rows="2" autocomplete="off" spellcheck="false" placeholder="${ok ? 'Saved — paste new details to replace them' : 'cloudinary://123456789012345:…@your-cloud'}" aria-label="Cloudinary API environment variable"></textarea>`,
     coach: `<p class="small">The coach's brain. Sign in at ${LINK('https://build.nvidia.com', 'build.nvidia.com')}, open any model, choose <b>Get API Key</b>, and paste it here. Free.</p>
       ${field('apiKey', 'nvapi-…', 'NVIDIA API key')}
       ${!inSetup ? `<label class="small" for="cxModel">Model</label><input id="cxModel" type="text" name="model" list="modelList" value="${esc(CFG.model || '')}" spellcheck="false"><datalist id="modelList">${MODELS.map(m => `<option value="${esc(m)}">`).join('')}</datalist>` : ''}`,
     voice: `<p class="small">Lets you talk instead of type: Whisper on Groq turns speech into text. Get a free key at ${LINK('https://console.groq.com/keys', 'console.groq.com/keys')}.</p>
       ${field('groqKey', 'gsk_…', 'Groq API key')}`,
   }[kind];
-  const title = { db: 'Database · Neon', storage: 'Storage · Cloudflare R2', coach: 'Coach · NVIDIA', voice: 'Voice · Groq' }[kind];
-  const btn = kind === 'storage' ? 'Test' : ok ? 'Test & save' : 'Connect';
+  const title = { db: 'Database · Neon', images: 'Images · Cloudinary', coach: 'Coach · NVIDIA', voice: 'Voice · Groq' }[kind];
+  const btn = ok ? 'Test & save' : 'Connect';
   return `<form class="cx" data-form="cx" data-kind="${kind}">
     <div class="cx-head"><b>${title}</b>${status}</div>
     ${body}
@@ -162,7 +163,7 @@ function cxCard(kind, inSetup) {
 }
 function paintSetup() {
   const g = $('#gate'), i = SETUP.step, st = CLOUD.setup, p = SETUP.profile || {};
-  const kinds = [null, 'db', 'storage', 'coach', 'voice'];
+  const kinds = [null, 'db', 'images', 'coach', 'voice'];
   const next = (label = 'Next', cls = 'primary', dis = false) => `<button type="button" class="${cls}" data-act="setupNext" ${dis ? 'disabled' : ''}>${label}</button>`;
   const back = i ? '<button type="button" class="ghost" data-act="setupBack">Back</button>' : '<span></span>';
   let main;
@@ -184,14 +185,13 @@ function paintSetup() {
     <div class="gate-foot">${back}<button type="button" class="primary" data-act="setupFinish">Open Forge</button></div>`;
   else {
     const kind = kinds[i], ok = st[kind], optional = kind === 'coach' || kind === 'voice';
-    main = `<h1>${{ db: 'Connect your database', storage: 'Check your storage', coach: 'Give the coach a brain', voice: 'Turn on voice' }[kind]}</h1>
+    main = `<h1>${{ db: 'Connect your database', images: 'Connect your image storage', coach: 'Give the coach a brain', voice: 'Turn on voice' }[kind]}</h1>
       ${cxCard(kind, true)}
       <div class="gate-foot">${back}${ok ? next() : optional ? next('Skip for now', 'ghost') : next('Next', 'primary', true)}</div>`;
   }
   g.innerHTML = `<div class="gate-card setup">
     <div class="gate-top"><div class="gate-logo">Forge</div><div class="gate-dots" aria-label="Step ${i + 1} of 6">${SETUP_STEPS.map((_, k) => stepDot(k, i)).join('')}</div></div>
     ${main}</div>`;
-  if (kinds[i] === 'storage' && !st.storage) setTimeout(() => g.querySelector('[data-form="cx"]')?.requestSubmit(), 50);
   g.querySelector('[autofocus], input')?.focus();
 }
 async function refreshSession() { const s = await detectCloud(); if (s) CLOUD = s; return CLOUD; }
@@ -200,14 +200,15 @@ async function cxSubmit(f) {
   const kind = f.dataset.kind, msg = f.querySelector('.cx-msg'), btn = f.querySelector('button:not([type=button])');
   const body = {};
   if (kind === 'db') body.url = f.url.value.trim();
+  if (kind === 'images') body.cloudinary = f.cloudinary.value.trim();
   if (kind === 'coach') { body.apiKey = f.apiKey.value.trim(); if (f.model) body.model = f.model.value.trim(); }
   if (kind === 'voice') body.groqKey = f.groqKey.value.trim();
   msg.className = 'cx-msg'; msg.textContent = 'Checking…'; btn.disabled = true;
   try {
     const j = await postJson('/api/setup/' + kind, body);
-    f.querySelectorAll('input[type=password]').forEach(i => i.value = '');
+    f.querySelectorAll('input[type=password], textarea').forEach(i => i.value = '');
     msg.className = 'cx-msg ok';
-    msg.textContent = { db: `Connected. ${j.items ? j.items + ' items already there.' : 'Empty and ready.'}`, storage: 'Works: wrote, read and deleted a test file.', coach: `Key works. ${j.models} models available.`, voice: 'Key works. Whisper is ready.' }[kind];
+    msg.textContent = { db: `Connected. ${j.items ? j.items + ' items already there.' : 'Empty and ready.'}`, images: `Works: a private test image went up, came back and was deleted (${j.cloud}).`, coach: `Key works. ${j.models} models available.`, voice: 'Key works. Whisper is ready.' }[kind];
     await refreshSession();
     if (kind === 'coach' || kind === 'voice') { CFG = await fetch('/api/config').then(r => r.json()).catch(() => CFG); if (kind === 'coach') loadModels(); }
     const keep = msg.textContent;
@@ -295,19 +296,19 @@ function paintSyncLine() { const el = $('#syncLine'); if (el) el.textContent = s
 const syncLineText = () => offline ? 'Offline — changes wait on this device.' : SY.at ? `Last synced ${fmtTime(SY.at)}.` : 'Not synced yet.';
 function cloudSettings() {
   const st = CSTATS;
-  const connections = `<div class="cx-grid">${['db', 'storage', 'coach', 'voice'].map(k => cxCard(k, false)).join('')}</div>`;
+  const connections = `<div class="cx-grid">${['db', 'images', 'coach', 'voice'].map(k => cxCard(k, false)).join('')}</div>`;
   const install = `<div class="set">
       <label>iPhone</label><p class="small">Open <b>${esc(location.host)}</b> in Safari → Share → <b>Add to Home Screen</b>. It opens like an app and works offline.</p>
       <label>Computer</label><p class="small">In Chrome or Edge, click the install icon at the right end of the address bar. Forge then opens in its own window.</p>
     </div>`;
   const data = `<div class="set">
       <label>Sync</label><div class="row" style="flex-wrap:wrap"><span class="small fg" id="syncLine">${esc(syncLineText())}</span><button class="btn sm" data-act="syncNowBtn">Sync now</button></div>
-      <label>Using</label><div class="mono small fg">${st ? `${st.items ?? '?'} items in Neon · ${st.files.count} file${st.files.count === 1 ? '' : 's'}, ${fmtBytes(st.files.bytes)} in R2` : '…'}</div>
-      <label>Safety net</label><p class="small">Every night your Forge saves a copy of everything into your R2 bucket (<code>backups/</code>) and keeps the last 30${st ? ` (${st.backups} now)` : ''}. Each device also keeps its own copy, so it works offline.</p>
+      <label>Using</label><div class="mono small fg">${st ? `${st.items ?? '?'} items in Neon${st.files ? ` · ${st.files.count} file${st.files.count === 1 ? '' : 's'}, ${fmtBytes(st.files.bytes)} in Cloudinary (${Math.round(st.files.credits * 10) / 10} of ${st.files.limit} free credits this month)` : ''}` : '…'}</div>
+      <label>Safety net</label><p class="small">Every night your Forge saves a copy of everything into your Cloudflare KV storage and keeps the last 30${st ? ` (${st.backups} now)` : ''}. Each device also keeps its own copy, so it works offline.</p>
       <label>Move it</label><div class="row"><button class="btn" data-act="export">Export backup</button><label class="btn" style="cursor:pointer">Import backup<input type="file" id="importFile" accept="application/json" hidden></label></div>
       <label>This device</label><div><button class="btn" data-act="logout">Log out</button></div>
     </div>`;
-  return `${section('Connections', null, 'Your own database, storage, coach and voice. Keys stay in your Cloudflare account and never reach this page.', connections)}${GAP}
+  return `${section('Connections', null, 'Your own database, image storage, coach and voice. Keys stay in your Cloudflare account and never reach this page.', connections)}${GAP}
     ${section('Install', null, 'Put Forge on your home screen and your desktop.', install)}${GAP}
     ${section('Data', null, 'In your own cloud. Back it up. Move it. It is yours.', data)}${GAP}`;
 }
