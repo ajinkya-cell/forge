@@ -581,3 +581,26 @@ body.gated > :not(.gate):not(#toasts) { visibility: hidden; }
 @media (max-width: 600px) and (display-mode: standalone) { .top-right .glass-btn[data-act="theme"] { display: none; } }
 @media (max-width: 600px) { .glass-pill.bd-tools { scrollbar-width: none; } .glass-pill.bd-tools::-webkit-scrollbar { display: none; } }
 .cx textarea { width: 100%; min-height: 64px; font: 14px/1.4 var(--code); resize: vertical; word-break: break-all; }
+
+/* ---------- Settings → Connect an AI ---------- */
+.ai { display: flex; flex-direction: column; gap: 14px; }
+.ai-url { display: flex; flex-direction: column; gap: 6px; }
+.ai-tok { display: flex; align-items: center; gap: 8px; background: var(--card); border-radius: 12px; padding: 8px 8px 8px 12px; min-width: 0; }
+.ai-tok code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; background: none; padding: 0; color: var(--fg); font-size: 13px; scrollbar-width: none; }
+.ai-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.ai-card { background: var(--card); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.ai-card p { margin: 0; }
+.ai-new { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 4px; }
+.ai-new input { grid-column: 1 / -1; height: 40px; }
+.ai-new select { height: 40px; }
+.ai-fresh { background: color-mix(in srgb, var(--a1, #0a84ff) 12%, var(--card)); border-radius: 16px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.ai-fresh p { margin: 0; }
+.ai-snip { background: var(--card); border-radius: 12px; overflow: hidden; }
+.ai-snip-h { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 8px 0 12px; }
+.ai-snip pre { margin: 0; padding: 10px 12px 12px; font: 12px/1.45 var(--code); overflow-x: auto; white-space: pre; color: var(--muted); }
+.ai-h { margin: 6px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: none; }
+.ai-list { list-style: none; margin: 0; padding: 0; background: var(--card); border-radius: 14px; overflow: hidden; }
+.ai-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; }
+.ai-list li + li { box-shadow: inset 0 .5px 0 var(--sep); }
+.ai-list li.undone { opacity: .55; }
+.ai-list .pill { margin-left: 4px; }

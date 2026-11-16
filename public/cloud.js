@@ -271,6 +271,8 @@ async function startCloudApp() {
   startApp();
   await syncNow();
   if (SETUP.profile) { Object.assign(S.profile, SETUP.profile); SETUP.profile = null; commit(); }
+  // AI apps work on the server, which needs your time zone for "today" and reminder times
+  try { const tz = Intl.DateTimeFormat().resolvedOptions().timeZone; if (tz && S.profile.tz !== tz) { S.profile.tz = tz; save(); } } catch { }
   setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 60000);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
   addEventListener('online', () => syncNow());
@@ -291,7 +293,77 @@ function registerSW() {
 
 /* ---------------- Settings in the cloud ---------------- */
 let CSTATS = null;
-const loadCloudStats = () => fetch('/api/stats').then(r => r.json()).then(j => { CSTATS = j; if (view === 'settings' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) render(); }).catch(() => { });
+const quietRender = () => { if (view === 'settings' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) render(); };
+const loadCloudStats = () => { loadConnect(); return fetch('/api/stats').then(r => r.json()).then(j => { CSTATS = j; quietRender(); }).catch(() => { }); };
+
+/* ---------------- Connect an AI: tokens, signed-in apps, and what they changed ---------------- */
+// CONNECT.fresh holds a token just made: shown once, never stored anywhere on this device.
+let CONNECT = { tokens: [], apps: [], activity: [], mcpUrl: location.origin + '/mcp', fresh: null, loaded: false };
+const loadConnect = () => Promise.all([fetch('/api/tokens').then(r => r.json()), fetch('/api/activity').then(r => r.json())])
+  .then(([t, a]) => { Object.assign(CONNECT, { tokens: t.tokens || [], apps: t.apps || [], mcpUrl: t.mcpUrl || CONNECT.mcpUrl, activity: a.items || [], loaded: true }); quietRender(); }).catch(() => { });
+const agoText = ms => { if (!ms) return 'never'; const s = (Date.now() - ms) / 1000; return s < 3600 ? 'in the last hour' : s < 86400 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'; };
+const copyBtn = (text, label = 'Copy') => `<button type="button" class="btn sm" data-act="copyText" data-text="${esc(text)}">${label}</button>`;
+const snippet = (title, text) => `<div class="ai-snip"><div class="ai-snip-h"><b>${title}</b>${copyBtn(text)}</div><pre>${esc(text)}</pre></div>`;
+function connectHtml() {
+  const C = CONNECT, url = C.mcpUrl;
+  const f = C.fresh, tok = f?.token || 'YOUR_TOKEN';
+  const fresh = f ? `<div class="ai-fresh">
+      <p><b>Token for “${esc(f.name)}”</b> (${f.scope === 'read' ? 'only read' : 'read and change'}). Copy it now: Forge shows it only once.</p>
+      <div class="ai-tok"><code>${esc(f.token)}</code>${copyBtn(f.token)}</div>
+      ${snippet('Claude Code (terminal)', `claude mcp add --transport http forge ${url} --header "Authorization: Bearer ${tok}"`)}
+      ${snippet('Antigravity (mcp_config.json)', JSON.stringify({ mcpServers: { forge: { serverUrl: url, headers: { Authorization: 'Bearer ' + tok } } } }, null, 2))}
+      ${snippet('Cursor (~/.cursor/mcp.json)', JSON.stringify({ mcpServers: { forge: { url, headers: { Authorization: 'Bearer ' + tok } } } }, null, 2))}
+      ${snippet('VS Code (.vscode/mcp.json)', JSON.stringify({ servers: { forge: { type: 'http', url, headers: { Authorization: 'Bearer ' + tok } } } }, null, 2))}
+      <div class="row"><button type="button" class="btn sm" data-act="hideToken">I've saved it</button></div>
+    </div>` : '';
+  const list = (items, empty, row) => items.length ? `<ul class="ai-list">${items.map(row).join('')}</ul>` : `<p class="small subtle">${empty}</p>`;
+  return `<div class="ai">
+    <div class="ai-url"><span class="small">Your Forge's AI address</span><div class="ai-tok"><code>${esc(url)}</code>${copyBtn(url)}</div></div>
+    <div class="ai-cards">
+      <div class="ai-card"><b>Claude (web, desktop, phone) · ChatGPT</b>
+        <p class="small">In Claude: Settings → Connectors → <b>Add custom connector</b>. Name it Forge and paste the address above. Click Connect, and Forge asks for your passphrase and what Claude may do. ChatGPT: Settings → Connectors → Create, same address.</p></div>
+      <div class="ai-card"><b>Claude Code · Antigravity · Cursor · VS Code</b>
+        <p class="small">These use a token. Make one below, and Forge shows the exact settings to paste.</p>
+        <form class="ai-new" data-form="aiToken">
+          <input name="name" placeholder="Name, e.g. Antigravity on laptop" maxlength="60" required aria-label="Token name">
+          <select name="scope" aria-label="What it may do"><option value="write">Read and change</option><option value="read">Only read</option></select>
+          <button class="primary">Make a token</button>
+        </form></div>
+    </div>
+    ${fresh}
+    <h4 class="ai-h">Connected</h4>
+    ${list([...C.apps.map(a => ({ ...a, kind: 'app' })), ...C.tokens.map(t => ({ ...t, kind: 'token' }))], C.loaded ? 'Nothing connected yet.' : 'Loading…', x => `<li>
+      <span><b>${esc(x.kind === 'app' ? x.app : x.name)}</b> <span class="pill">${x.scope === 'read' ? 'only read' : 'read and change'}</span><br>
+      <span class="small subtle">${x.kind === 'app' ? `signed in · sends to ${esc(x.host)}` : `token · last used ${agoText(x.last)}`}</span></span>
+      <button type="button" class="ghost" data-act="${x.kind === 'app' ? 'aiDisconnect' : 'aiRevoke'}" data-id="${esc(x.id)}">${x.kind === 'app' ? 'Disconnect' : 'Revoke'}</button></li>`)}
+    <h4 class="ai-h">What AI apps changed</h4>
+    ${list(C.activity.slice(0, 15), 'No changes from AI apps yet.', x => `<li class="${x.undone ? 'undone' : ''}">
+      <span><b>${esc(x.client || 'AI app')}</b> · ${esc(x.summary || x.tool)}<br><span class="small subtle">${agoText(x.at)}</span></span>
+      ${x.undone ? '<span class="small subtle">undone</span>' : `<button type="button" class="ghost" data-act="aiUndo" data-id="${x.id}">Undo</button>`}</li>`)}
+    <p class="small subtle">AI apps never see your Neon, Cloudinary, NVIDIA or Groq keys. Anything they write in tasks or notes is treated as your data, and deleting needs your OK in the chat.</p>
+  </div>`;
+}
+Object.assign(CLOUD_FORMS, {
+  aiToken: async f => {
+    try {
+      const j = await postJson('/api/tokens', { name: f.name.value, scope: f.scope.value });
+      CONNECT.fresh = j; f.reset(); await loadConnect(); render();
+      document.querySelector('.ai-fresh')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) { toast(e.message); }
+  },
+});
+const apiDelete = async url => { const r = await fetch(url, { method: 'DELETE' }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'That did not work.'); };
+Object.assign(CLOUD_ACT, {
+  copyText: async el => { try { await navigator.clipboard.writeText(el.dataset.text); toast('Copied.'); } catch { toast('Copy failed: select the text and copy it.'); } },
+  hideToken: () => { CONNECT.fresh = null; render(); },
+  aiRevoke: async el => { if (!confirm('Revoke this token? Apps using it stop working within a minute.')) return; try { await apiDelete('/api/tokens/' + el.dataset.id); if (CONNECT.fresh?.id === el.dataset.id) CONNECT.fresh = null; await loadConnect(); toast('Revoked.'); } catch (e) { toast(e.message); } },
+  aiDisconnect: async el => { if (!confirm('Disconnect this app from your Forge?')) return; try { await apiDelete('/api/apps/' + encodeURIComponent(el.dataset.id)); await loadConnect(); toast('Disconnected.'); } catch (e) { toast(e.message); } },
+  aiUndo: async el => {
+    el.disabled = true;
+    try { const j = await postJson('/api/activity/undo', { id: Number(el.dataset.id) }); toast('Undone: ' + j.summary); await syncNow(); await loadConnect(); }
+    catch (e) { toast(e.message); el.disabled = false; }
+  },
+});
 function paintSyncLine() { const el = $('#syncLine'); if (el) el.textContent = syncLineText(); }
 const syncLineText = () => offline ? 'Offline — changes wait on this device.' : SY.at ? `Last synced ${fmtTime(SY.at)}.` : 'Not synced yet.';
 function cloudSettings() {
@@ -309,6 +381,7 @@ function cloudSettings() {
       <label>This device</label><div><button class="btn" data-act="logout">Log out</button></div>
     </div>`;
   return `${section('Connections', null, 'Your own database, image storage, coach and voice. Keys stay in your Cloudflare account and never reach this page.', connections)}${GAP}
+    ${section('Connect an AI', null, 'Use Forge from Claude, Antigravity, Cursor or ChatGPT: ask what is on today, add tasks, start timers, all from your own chats.', connectHtml())}${GAP}
     ${section('Install', null, 'Put Forge on your home screen and your desktop.', install)}${GAP}
     ${section('Data', null, 'In your own cloud. Back it up. Move it. It is yours.', data)}${GAP}`;
 }

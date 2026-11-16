@@ -4,11 +4,14 @@
   "name": "forge",
   "main": "cloud/worker.js",
   "compatibility_date": "2026-10-01",
+  // needed for AI apps that identify themselves with a Client ID Metadata Document (MCP sign-in)
+  "compatibility_flags": ["global_fetch_strictly_public"],
   // The app itself (HTML, CSS, JS, icons). Anything that isn't a file here goes to the Worker.
   "assets": { "directory": "./public" },
   // Small private storage for your keys, login lockouts and nightly backups.
   // Cloudflare creates it in your account when you deploy and hands the Worker its key.
-  "kv_namespaces": [{ "binding": "KV" }],
+  "kv_namespaces": [{ "binding": "KV" }, { "binding": "OAUTH_KV" }],
+  // OAUTH_KV: sign-ins of AI apps (Claude, ChatGPT…) that connect to your Forge at /mcp
   // Every night: a snapshot of your data into KV (last 30 kept).
   "triggers": { "crons": ["17 3 * * *"] },
   "workers_dev": true,

@@ -38,6 +38,26 @@ npx wrangler secret put PASSPHRASE
 npx wrangler deploy
 ```
 
+## Use Forge from your AI
+
+Your Forge is also an **MCP server**, so you can use it from the AI you already chat with. Ask "what do I have to do today?", "add *finish the DBMS assignment* to Studies, due Friday", "start a 50 minute timer", or "how was my week?". Changes appear on your phone and computer at their next sync.
+
+Your address is `https://forge.<you>.workers.dev/mcp`. **Settings → Connect an AI** shows it with a Copy button.
+
+| App | How to connect |
+|---|---|
+| **Claude** (web, desktop, phone) | Settings → Connectors → **Add custom connector** → paste the address. Claude opens your Forge: enter your passphrase and choose **Read and change** or **Only read**. |
+| **ChatGPT** | Settings → Connectors → Create → paste the address, then sign in the same way. |
+| **Claude Code, Antigravity, Cursor, VS Code** | In Forge: Settings → Connect an AI → **Make a token**. Forge shows the exact command or JSON to paste for each app. |
+
+- **What AI apps can do:** 19 tools for today's plan, finding, adding, changing and completing tasks, the top 3, projects, the focus timer, reminders, the board, progress and memory, plus three ready-made prompts: *Plan my day*, *Weekly review* and *Brain dump*.
+- **Safety:**
+  - Read-only connections can't change anything.
+  - Deleting needs your OK in the chat.
+  - Text inside your tasks and notes is never treated as instructions.
+  - Every change an AI makes is listed in Settings → Connect an AI with an **Undo** button.
+- **Disconnecting:** revoke a token or disconnect an app there at any time. Your Neon, Cloudinary, NVIDIA and Groq keys never leave your Worker.
+
 ## How it works
 
 - **One Cloudflare Worker** serves the app and its API (`cloud/worker.js`). Its KV storage is linked in `wrangler.jsonc`, so it needs no key.
@@ -53,7 +73,7 @@ npx wrangler deploy
 |---|---|---|
 | Workers | 100,000 requests/day | One person syncs a few hundred a day |
 | Neon | 0.5 GB | Years of tasks and notes |
-| Workers KV | 1 GB, 1,000 writes/day | Keys and 30 nightly backups |
+| Workers KV | 1 GB, 1,000 writes/day | Keys, AI connections and 30 nightly backups |
 | Cloudinary | 25 credits/month (1 credit ≈ 1 GB stored or 1 GB viewed); 10 MB per image | Thousands of board images (they're shrunk before upload) |
 
 ## Moving from the old local Forge

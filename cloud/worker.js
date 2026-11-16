@@ -6,6 +6,9 @@
 //   - NVIDIA (coach) and Groq (voice) keys are read here and never sent to the browser
 // Login: a passphrase set as a Worker secret (PASSPHRASE), then a signed cookie for a year.
 import { neon, neonConfig } from '@neondatabase/serverless';
+import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
+import { handleMcp, createToken, listTokens, revokeToken, resolvePersonalToken, consentPage } from './mcp.js';
+import { listActivity, undoActivity } from './tools.js';
 
 const DEFAULT_AI = { baseUrl: 'https://integrate.api.nvidia.com/v1', model: 'nvidia/nemotron-3-ultra-550b-a55b' };
 const GROQ = 'https://api.groq.com/openai/v1';
@@ -75,26 +78,33 @@ async function loginGate(env, ip) {
   const key = 'login:' + b64u(await sha256(ip)).slice(0, 22);
   return { key, rec: (await env.KV.get(key, 'json').catch(() => null)) || { n: 0, until: 0 } };
 }
-async function login(req, env) {
-  if (!env.PASSPHRASE) return json(500, { error: 'This Forge has no passphrase yet. Set the PASSPHRASE secret in Cloudflare (see the README).' });
-  const ip = req.headers.get('CF-Connecting-IP') || 'local';
-  const { key, rec } = await loginGate(env, ip);
-  if (rec.until > Date.now()) return json(429, { error: `Too many wrong tries. Try again in ${Math.ceil((rec.until - Date.now()) / 60000)} min.` });
-  const body = await req.json().catch(() => ({}));
-  const ok = crypto.subtle.timingSafeEqual(await sha256(String(body.passphrase || '')), await sha256(env.PASSPHRASE));
+// Checks a passphrase with the lockout. Used by the app's login and by the AI sign-in page.
+async function checkPassphrase(req, env, pass) {
+  if (!env.PASSPHRASE) return { status: 500, error: 'This Forge has no passphrase yet. Set the PASSPHRASE secret in Cloudflare (see the README).' };
+  const { key, rec } = await loginGate(env, req.headers.get('CF-Connecting-IP') || 'local');
+  if (rec.until > Date.now()) return { status: 429, error: `Too many wrong tries. Try again in ${Math.ceil((rec.until - Date.now()) / 60000)} min.` };
+  const ok = crypto.subtle.timingSafeEqual(await sha256(String(pass || '')), await sha256(env.PASSPHRASE));
   if (!ok) {
     rec.n = (rec.n || 0) + 1;
     if (rec.n >= 5) { rec.n = 0; rec.until = Date.now() + 15 * 60000; }
     if (key) await env.KV.put(key, JSON.stringify(rec), { expirationTtl: 3600 });
-    return json(401, { error: rec.until > Date.now() ? 'Too many wrong tries. Locked for 15 minutes.' : "That passphrase isn't right." });
+    return { status: 401, error: rec.until > Date.now() ? 'Too many wrong tries. Locked for 15 minutes.' : "That passphrase isn't right." };
   }
   if (key && (rec.n || rec.until)) await env.KV.delete(key);
+  return { ok: true };
+}
+async function login(req, env) {
+  const body = await req.json().catch(() => ({}));
+  const r = await checkPassphrase(req, env, body.passphrase);
+  if (!r.ok) return json(r.status, { error: r.error });
   return json(200, { ok: true }, { 'Set-Cookie': cookie(req, await makeToken(env), YEAR) });
 }
 
 /* ---------- the database ---------- */
 // NEON_DEV_PROXY is for local development only (see tools/neon-dev-proxy.js); deployed Forge talks to Neon directly.
 function db(env, url) {
+  // local development: refuse any database except the dev one, so tests can never touch real data
+  if (env.DEV_DATABASE_NAME && new URL(url).pathname.slice(1) !== env.DEV_DATABASE_NAME) throw new Error(`Local dev only uses the ${env.DEV_DATABASE_NAME} database. Point setup at it.`);
   if (env.NEON_DEV_PROXY) neonConfig.fetchEndpoint = host => env.NEON_DEV_PROXY + '?host=' + encodeURIComponent(host);
   return neon(url);
 }
@@ -490,6 +500,31 @@ async function handle(req, env) {
     try { return json(200, (await linkPreview(url.searchParams.get('url') || '')) || {}); } catch { return json(200, {}); }
   }
   if (p === '/api/upload' && req.method === 'POST') return upload(req, env);
+  /* ---- Connect an AI: personal tokens, signed-in apps, and what they changed ---- */
+  if (p === '/api/tokens' && req.method === 'GET') {
+    let apps = [];
+    try { apps = ((await env.OAUTH_PROVIDER?.listUserGrants(OWNER))?.items || []).map(g => ({ id: g.id, app: g.metadata?.app || 'AI app', host: g.metadata?.host || '', scope: g.scope?.includes('forge:write') ? 'write' : 'read', created: g.createdAt })); } catch { }
+    return json(200, { tokens: env.KV ? await listTokens(env) : [], apps, mcpUrl: url.origin + '/mcp' });
+  }
+  if (p === '/api/tokens' && req.method === 'POST') {
+    if (!env.KV) return json(500, { error: 'No KV storage linked.' });
+    const b = await req.json().catch(() => ({}));
+    return json(200, await createToken(env, b.name, b.scope));
+  }
+  if (p.startsWith('/api/tokens/') && req.method === 'DELETE') return json((await revokeToken(env, p.slice(12))) ? 200 : 404, { ok: true });
+  if (p.startsWith('/api/apps/') && req.method === 'DELETE') {
+    try { await env.OAUTH_PROVIDER.revokeGrant(p.slice(10), OWNER); return json(200, { ok: true }); } catch (e) { return json(404, { error: 'Not found' }); }
+  }
+  if (p === '/api/activity') {
+    const sql = await sqlOrNull(env);
+    return json(200, { items: sql ? (await listActivity(sql)).map(r => ({ ...r, id: Number(r.id), at: Number(r.at) })) : [] });
+  }
+  if (p === '/api/activity/undo' && req.method === 'POST') {
+    const sql = await sqlOrNull(env), b = await req.json().catch(() => ({}));
+    if (!sql) return json(409, { error: 'No database connected.' });
+    const r = await undoActivity(sql, Number(b.id));
+    return json(r.error ? 400 : 200, r);
+  }
   if (p === '/api/stats') {
     const c = await readCfg(env);
     let items = null, backups = 0, files = null;
@@ -504,10 +539,74 @@ async function handle(req, env) {
   return json(404, { error: 'Not found' });
 }
 
+/* ---------- the sign-in page AI apps send you to (OAuth consent) ---------- */
+async function authorize(req, env) {
+  const P = env.OAUTH_PROVIDER, page = (o, status = 200, headers) => new Response(consentPage(o), { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY', ...(headers ? Object.fromEntries(headers) : {}) } });
+  const problem = (msg, status = 400) => new Response(`<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Forge</title><body style="font:16px system-ui;padding:40px;max-width:520px;margin:auto"><h2>Forge couldn't connect that app</h2><p>${String(msg).replace(/[<>&]/g, '')}</p><p>Go back to the app and try connecting again.</p>`, { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+  if (!P) return problem('Sign-in for AI apps is not set up on this Forge.', 500);
+  if (req.method === 'GET') {
+    let ar; try { ar = await P.parseAuthRequest(req); } catch (e) { return problem(e?.message || 'The request from the app was not valid.'); }
+    const d = await P.describeConsent(ar), tx = await P.beginConsent(ar);
+    const info = { app: d.clientName || d.clientDomain || 'An AI app', host: d.redirectHost, loopback: d.redirectIsLoopback, scopeAsked: ar.scope?.includes('forge:write') || !ar.scope?.length ? 'write' : 'read' };
+    await env.KV.put('consent:' + tx.handle.slice(0, 64), JSON.stringify(info), { expirationTtl: 900 });
+    return page({ ...info, handle: tx.handle, needPass: !(await isAuthed(req, env)) }, 200, tx.headers);
+  }
+  const f = await req.formData(), handle = String(f.get('handle') || ''), info = await env.KV.get('consent:' + handle.slice(0, 64), 'json');
+  if (!info) return problem('This sign-in page expired.');
+  if (f.get('decision') !== 'allow') { const d = await P.denyConsent(req, handle); return new Response(null, { status: 302, headers: d.headers }); }
+  const authed = await isAuthed(req, env), extra = [];
+  if (!authed) {
+    const r = await checkPassphrase(req, env, f.get('passphrase'));
+    if (!r.ok) return page({ ...info, handle, needPass: true, error: r.error }, r.status);
+    extra.push(cookie(req, await makeToken(env), YEAR));
+  }
+  const access = f.get('access') === 'read' ? 'read' : 'write', scope = access === 'write' ? ['forge:read', 'forge:write', 'offline_access'] : ['forge:read', 'offline_access'];
+  let ok; try { ok = await P.approveConsent(req, handle, { scope }); } catch (e) { return problem(e?.message || 'This sign-in page expired.'); }
+  const { redirectTo } = await P.completeAuthorization({ request: ok.request, userId: OWNER, scope, metadata: { app: info.app, host: info.host, at: Date.now() }, props: { scope: access, client: info.app, via: 'oauth' } });
+  await env.KV.delete('consent:' + handle.slice(0, 64)).catch(() => { });
+  const h = new Headers(ok.headers); h.set('Location', redirectTo); extra.forEach(c => h.append('Set-Cookie', c));
+  return new Response(null, { status: 302, headers: h });
+}
+
+/* ---------- entry: OAuth for /mcp around the app ---------- */
+const OWNER = 'owner'; // one person per Forge
+async function sqlOrNull(env) { const c = await readCfg(env); return c.neonUrl ? db(env, c.neonUrl) : null; }
+async function appFetch(req, env) {
+  try {
+    const p = new URL(req.url).pathname;
+    if (p === '/authorize') return await authorize(req, env);
+    return await handle(req, env);
+  } catch (e) { return json(500, { error: e?.message || 'Something went wrong.' }); }
+}
+const providers = new Map();
+function providerFor(origin) {
+  if (!providers.has(origin)) providers.set(origin, new OAuthProvider({
+    apiRoute: '/mcp',
+    apiHandler: { fetch: (req, env, ctx) => handleMcp(req, env, ctx.props || {}, () => sqlOrNull(env)) },
+    defaultHandler: { fetch: (req, env) => appFetch(req, env) },
+    authorizeEndpoint: '/authorize',
+    tokenEndpoint: '/oauth/token',
+    clientRegistrationEndpoint: '/oauth/register',
+    clientIdMetadataDocumentEnabled: true,
+    scopesSupported: ['forge:read', 'forge:write', 'offline_access'],
+    requiredScopes: ['forge:read'],
+    accessTokenTTL: 3600,
+    refreshTokenTTL: 90 * 86400,
+    refreshTokenIdleTTL: 30 * 86400,
+    resourceMetadata: { resource: origin + '/mcp', authorization_servers: [origin], bearer_methods_supported: ['header'], resource_name: 'Forge' },
+    // personal tokens made in Settings (fg_…) for apps that take a header instead of a sign-in
+    resolveExternalToken: async ({ token, env }) => { const props = await resolvePersonalToken(env, token); return props ? { props, audience: origin + '/mcp' } : null; },
+  }));
+  return providers.get(origin);
+}
+
 export default {
-  async fetch(req, env) {
-    try { return await handle(req, env); }
-    catch (e) { return json(500, { error: e?.message || 'Something went wrong.' }); }
+  async fetch(req, env, ctx) {
+    if (!env.OAUTH_KV) return appFetch(req, env); // older deploys without the sign-in storage keep working
+    return providerFor(new URL(req.url).origin).fetch(req, env, ctx);
   },
-  async scheduled(event, env, ctx) { ctx.waitUntil(backup(env)); },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(backup(env));
+    if (env.OAUTH_KV) ctx.waitUntil(providerFor('https://forge.invalid').purgeExpiredData(env).catch(() => { }));
+  },
 };
