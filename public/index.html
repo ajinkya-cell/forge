@@ -7,14 +7,17 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Forge">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f4f3" media="(prefers-color-scheme: light)">
 <title>Forge</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="stylesheet" href="styles.css">
-<link rel="stylesheet" href="apple.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@200..700&family=Geist+Mono:wght@400..600&family=Instrument+Serif:ital@1&display=swap">
+<link rel="stylesheet" href="ink.css">
 </head>
 <body>
 <div id="offline" class="offline" role="status" hidden>
@@ -29,6 +32,7 @@
       <button data-act="view" data-view="today">Today</button>
       <button data-act="view" data-view="tasks">Tasks</button>
       <button data-act="view" data-view="board">Board</button>
+      <button data-act="view" data-view="notes">Notes</button>
       <button data-act="view" data-view="progress">Progress</button>
       <button data-act="view" data-view="settings">Settings</button>
     </nav>
@@ -88,6 +92,7 @@
 <div id="recChip" class="rec-chip" role="status" hidden></div>
 <script src="views.js"></script>
 <script src="board.js"></script>
+<script src="notes.js"></script>
 <script src="timer.js"></script>
 <script src="coach.js"></script>
 <script src="cloud.js"></script>

@@ -50,7 +50,7 @@ for (const n of names) {
 const fixed = JSON.parse(raw.replace(/\/uploads\/[\w.-]+/g, m => map[m] || m));
 
 // 2. items: one row each, the same shape the app syncs
-const KINDS = ['projects', 'tasks', 'board', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat'];
+const KINDS = ['projects', 'tasks', 'board', 'notes', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat'];
 const KV = ['profile', 'boardCam', 'briefs', 'bonus', 'timer', 'cycle', 'chatUnread'];
 const uid = () => Math.random().toString(36).slice(2, 10);
 const u = Date.now(), changes = [], counts = {};

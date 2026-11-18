@@ -17,7 +17,7 @@ const NVIDIA_FALLBACKS = ['nvidia/nemotron-3-ultra-550b-a55b', 'mistralai/mistra
 const CFG_KEY = 'config';
 const COOKIE = 'forge_session';
 const YEAR = 365 * 24 * 3600;
-const KINDS = new Set(['projects', 'tasks', 'board', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat', 'kv']);
+const KINDS = new Set(['projects', 'tasks', 'board', 'notes', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat', 'kv']);
 const PAGE = 2000;
 
 const MIME = {
@@ -547,7 +547,7 @@ async function authorize(req, env) {
   if (req.method === 'GET') {
     let ar; try { ar = await P.parseAuthRequest(req); } catch (e) { return problem(e?.message || 'The request from the app was not valid.'); }
     const d = await P.describeConsent(ar), tx = await P.beginConsent(ar);
-    const info = { app: d.clientName || d.clientDomain || 'An AI app', host: d.redirectHost, loopback: d.redirectIsLoopback, scopeAsked: ar.scope?.includes('forge:write') || !ar.scope?.length ? 'write' : 'read' };
+    const info = { app: d.clientName || d.clientDomain || 'An AI app', host: d.redirectHost, loopback: d.redirectIsLoopback, scopeAsked: 'write' }; // apps only ask for the baseline scope up front; you choose here
     await env.KV.put('consent:' + tx.handle.slice(0, 64), JSON.stringify(info), { expirationTtl: 900 });
     return page({ ...info, handle: tx.handle, needPass: !(await isAuthed(req, env)) }, 200, tx.headers);
   }

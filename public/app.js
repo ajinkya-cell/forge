@@ -12,16 +12,16 @@ const fmtTime = ms => new Date(ms).toLocaleTimeString([], { hour: 'numeric', min
 const mmss = s => `${pad(Math.floor(s / 60))}:${pad(Math.floor(s % 60))}`;
 
 const AREAS = {
-  studies: { label: 'Studies', color: '#0a84ff' },
-  coding: { label: 'Coding', color: '#30d158' },
-  ventures: { label: 'Ventures', color: '#ff9f0a' },
-  life: { label: 'Health & personal', color: '#ff375f' },
+  studies: { label: 'Studies', color: 'var(--area-studies)' },
+  coding: { label: 'Coding', color: 'var(--area-coding)' },
+  ventures: { label: 'Ventures', color: 'var(--area-ventures)' },
+  life: { label: 'Health & personal', color: 'var(--area-life)' },
 };
 const TITLES = ['Spark', 'Apprentice', 'Striker', 'Smith', 'Operator', 'Machine', 'Veteran', 'Relentless', 'Master', 'Legend'];
 const DEFAULTS = {
   profile: { name: '', theme: 'dark', pen: '', clock24: false, clockStyle: 'digital', calOpen: false, heroMode: 'clock', eveningHour: 21, focusMin: 50,
     goalHours: 8, minCount: 1, sound: 'chime', volume: 0.6, tick: false, notifyEnd: true, titleTimer: true, wakeLock: false },
-  projects: [], tasks: [], board: [], boardCam: null, sessions: [], xpEvents: [], reminders: [], memory: [], chat: [], chatUnread: false, briefs: {}, bonus: {}, timer: null, cycle: null, savedAt: 0,
+  projects: [], tasks: [], board: [], notes: [], boardCam: null, sessions: [], xpEvents: [], reminders: [], memory: [], chat: [], chatUnread: false, briefs: {}, bonus: {}, timer: null, cycle: null, savedAt: 0,
 };
 
 let S = structuredClone(DEFAULTS);
@@ -63,7 +63,22 @@ function commit(focusSel) { save(); render(); if (focusSel) $(focusSel)?.focus()
 function toast(text, cls = '', ms = 3200) {
   const el = document.createElement('div');
   el.className = 'toast ' + cls; el.textContent = text;
-  $('#toasts').append(el); setTimeout(() => el.remove(), ms);
+  // leave the way it came in, so the eye isn't yanked by a sudden gap
+  $('#toasts').append(el); setTimeout(() => { el.classList.add('leaving'); setTimeout(() => el.remove(), 220); }, ms);
+}
+/* ---------------- feedback for things that take a moment ---------------- */
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)');
+// replay a one-shot class (did-ok, did-err, shake) even if it is still on the element
+const flash = (el, cls, ms = 900) => { if (!el) return; el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); setTimeout(() => el.classList.remove(cls), ms); };
+const shake = el => flash(el, 'shake', 420);
+// a button that starts async work shows it is working, then a tick or a shake; it can't be pressed twice
+async function withBusy(btn, fn) {
+  if (!btn) return fn();
+  if (btn.getAttribute('aria-busy') === 'true') return new Promise(() => { }); // a second press waits on the first, silently
+  btn.setAttribute('aria-busy', 'true'); btn.disabled = true;
+  try { const r = await fn(); if (btn.isConnected) flash(btn, 'did-ok'); return r; }
+  catch (e) { if (btn.isConnected) flash(btn, 'did-err', 420); throw e; }
+  finally { btn.removeAttribute('aria-busy'); btn.disabled = false; }
 }
 let audio;
 function chime() {
@@ -146,6 +161,7 @@ function setDone(t, done) {
     t.done = false; t.doneAt = null;
     if (t.xp) { S.xpEvents.push({ t: Date.now(), a: -t.xp, r: 'Reopened: ' + t.title }); t.xp = 0; }
   }
+  if (t.noteId) ntSyncTask(t); // the checklist line it came from follows
 }
 function setTop3(t, on) {
   if (on && top3().length >= 3) return toast('Three is the limit. Finish one or swap one out.');
@@ -202,13 +218,14 @@ Projects: ${S.projects.map(p => `${p.name} (${p.area}${p.deadline ? ', deadline 
 Pending reminders: ${S.reminders.filter(r => !r.fired).map(r => `[${r.id}] ${r.text} @ ${localInput(r.at)}`).join('; ') || '(none)'}
 Done today: ${S.tasks.filter(t => t.done && dkey(t.doneAt) === tk).map(line).join('; ') || '(none)'}
 Latest board items: ${board.join(' | ') || '(none)'}
+Notes (newest first, use read_note for the text): ${S.notes.filter(n => !n.archived).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 12).map(n => `[${n.id}] "${(n.title || ntPlain(n.html).slice(0, 40) || 'Untitled').slice(0, 60)}"${n.inbox ? ' (Inbox)' : ''}`).join(' | ') || '(none)'}
 Things the user asked you to remember:\n${(S.memory || []).slice(-30).map(m => `[${m.id}] ${m.text}`).join('\n') || '(nothing yet)'}
 Timer: ${!S.timer ? 'none running' : S.timer.kind === 'stopwatch' ? `stopwatch ${timerRunning() ? 'running' : 'paused'}` : `${Math.round(S.timer.dur / 60)} min focus, ${Math.ceil(timerLeft() / 60)} min left, ${timerRunning() ? 'running' : 'paused'}`}`;
 }
 const SYSTEM = () => `You are Forge, the productivity coach inside ${S.profile.name || 'the user'}'s personal dashboard.
 Personality: tough coach. Blunt, direct, zero fluff, no flattery. Call out procrastination, vague plans and overloaded days. You are hard on them because you are on their side. Never insulting.
 Style: plain text only, no markdown, no asterisks. Under 110 words unless they ask for a full plan.
-You can act on the dashboard with your tools: timers, tasks, top 3, reminders, board notes, memory, switching pages.
+You can act on the dashboard with your tools: timers, tasks, top 3, reminders, board notes, notes (lists and brain dumps on the Notes page), memory, switching pages.
 How to act:
 - The DASHBOARD STATE below is live and always wins over anything said earlier in this chat. Never answer about the timer, tasks or reminders from memory of the conversation; read the state.
 - A direct instruction ("start a 30 min timer", "add…", "pause it") is permission: call the tool in this same turn, then confirm in one short sentence. Only ask first if a tool returns an error that needs their choice.
@@ -331,7 +348,18 @@ async function makeBrief(kind) {
 const ACT = {
   toggleAgent: () => openAgent(!$('#agent').classList.contains('open')),
   chatSuggest: el => sendChat(el.dataset.s),
-  toggleDone: el => { const t = taskById(el.dataset.id); if (!t) return; setDone(t, !t.done); commit(); },
+  toggleDone: el => {
+    const t = taskById(el.dataset.id); if (!t) return;
+    // finishing gets a beat of follow-through (tick, strike, fade) before the list moves on
+    const row = el.closest('.task');
+    if (!t.done && row && !REDUCED.matches) {
+      if (row.classList.contains('completing')) return;
+      row.classList.add('completing'); el.setAttribute('aria-pressed', 'true');
+      setTimeout(() => { if (!t.done) { setDone(t, true); commit(); } }, 420);
+      return;
+    }
+    setDone(t, !t.done); commit();
+  },
   toggleTop3: el => { const t = taskById(el.dataset.id); setTop3(t, t.top3 !== today()); commit(); },
   editTask: el => { const t = taskById(el.dataset.id); if (t) openTaskDialog(t); },
   delTask: el => { S.tasks = S.tasks.filter(t => t.id !== el.dataset.id); S.reminders = S.reminders.filter(r => r.taskId !== el.dataset.id); $('#taskDialog').close(); commit(); },
@@ -343,6 +371,7 @@ const ACT = {
   openDone: () => { view = 'tasks'; doneShown = 20; render(); requestAnimationFrame(() => $('#done')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); },
   filterProject: el => { taskFilter.project = el.dataset.id || null; render(); },
   delProject: (el, e) => { e.stopPropagation(); if (!confirm('Delete this project? Its tasks stay.')) return; S.projects = S.projects.filter(p => p.id !== el.dataset.id); S.tasks.forEach(t => { if (t.projectId === el.dataset.id) t.projectId = null; }); if (taskFilter.project === el.dataset.id) taskFilter.project = null; commit(); },
+  cycleProjColor: (el, e) => { e.stopPropagation(); const p = S.projects.find(p => p.id === el.dataset.id); if (!p) return; p.color = PROJ_COLORS[(PROJ_COLORS.indexOf(projColor(p)) + 1) % PROJ_COLORS.length]; commit(); },
   clock: el => { S.profile.clock24 = !!el.dataset.v; commit(); },
   askNotify,
   testAi: async () => { toast('Testing…', '', 1500); try { const out = await ai([{ role: 'user', content: 'Reply with exactly: ready' }], { max_tokens: 10 }); toast('Connected. The model says: ' + out.slice(0, 40)); } catch (e) { toast(e.message, '', 8000); } },
@@ -353,7 +382,7 @@ const FORMS = {
   calAdd: f => { const q = parseQuick(f.title.value); if (!q.title) return; addTask({ title: q.title, area: q.area, priority: q.priority, due: q.due || calSel || today() }); commit('#calAddIn'); },
   top3new: f => { const q = parseQuick(f.title.value); if (!q.title || top3().length >= 3) return; addTask({ title: q.title, area: q.area || undefined, priority: q.priority, due: q.due || today(), top3: today() }); commit('.slot input'); },
   reminder: f => { if (addReminder(f.text.value.trim(), new Date(f.at.value).getTime())) { askNotify(); commit(); } },
-  project: f => { S.projects.push({ id: uid(), name: f.name.value.trim(), area: f.area.value, deadline: f.deadline.value || null }); commit(); },
+  project: f => { S.projects.push({ id: uid(), name: f.name.value.trim(), area: f.area.value, deadline: f.deadline.value || null, color: f.color?.value || null }); commit(); },
   taskEdit: f => {
     const t = taskById(f.dataset.id);
     Object.assign(t, { title: f.title.value.trim() || t.title, area: f.area.value, projectId: f.projectId.value || null, priority: f.priority.value, due: f.due.value || null, notes: f.notes.value });
@@ -375,7 +404,7 @@ const FORMS = {
   welcome: f => { S.profile.name = f.name.value.trim(); $('#welcome').close(); commit(); makeBrief('morning'); },
 };
 
-Object.assign(ACT, EXTRA_ACT, BOARD_ACT, TIMER_ACT, COACH_ACT, CLOUD_ACT);
+Object.assign(ACT, EXTRA_ACT, BOARD_ACT, NOTE_ACT, TIMER_ACT, COACH_ACT, CLOUD_ACT);
 Object.assign(FORMS, BOARD_FORMS, CLOUD_FORMS);
 initViewLayer();
 document.addEventListener('click', e => { const el = e.target.closest('[data-act]'); if (el && ACT[el.dataset.act]) ACT[el.dataset.act](el, e); });
@@ -389,6 +418,7 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'bdSearch') bdSearchInput(e.target.value);
+  if (e.target.id === 'ntSearch') { NT.q = e.target.value; ntPaintGrid(); }
   if (e.target.id === 'chatInput') { e.target.style.height = ''; e.target.style.height = Math.min(140, e.target.scrollHeight) + 'px'; }
 });
 document.addEventListener('keydown', e => {
@@ -401,6 +431,10 @@ document.addEventListener('keydown', e => {
   if (e.key === ' ' && !typing && view === 'today' && S.profile.heroMode === 'timer' && !document.querySelector('dialog[open]') && !e.target.closest('button')) { e.preventDefault(); S.timer ? ACT.pauseTimer() : ACT.startTimer(); return; }
   // T flips the hero between the clock and the timer.
   if (e.key.toLowerCase() === 't' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey && view === 'today' && !document.querySelector('dialog[open]')) { e.preventDefault(); ACT.heroMode({ dataset: { v: S.profile.heroMode === 'timer' ? 'clock' : 'timer' } }); return; }
+  // N starts a new note from anywhere; Enter opens a focused note card
+  if (e.key.toLowerCase() === 'n' && !typing && view !== 'board' && !e.ctrlKey && !e.metaKey && !e.altKey && !document.querySelector('dialog[open]')) { e.preventDefault(); ntStart(); return; }
+  if (e.key === 'Enter' && e.target.classList?.contains('nt-card') && e.target.dataset.id) { e.preventDefault(); ntOpenNote(e.target.dataset.id); return; }
+  if (e.key === 'Escape' && view === 'notes' && NT.open && !typing && !document.querySelector('dialog[open]')) { ntClose(); return; }
   bdKey(e);
 });
 document.addEventListener('keyup', e => { coachKeyUp(e); bdKeyUp(e); });
@@ -427,7 +461,7 @@ async function checkVersion() {
     const { v } = await (await fetch('/api/version')).json();
     if (appVersion === null) { appVersion = v; return; }
     if (v === appVersion) return;
-    const a = document.activeElement, busyNow = a?.isContentEditable || /INPUT|TEXTAREA|SELECT/.test(a?.tagName) || document.querySelector('dialog[open]') || BD.editing || BD.drag || busy.chat || REC.on || REC.busy;
+    const a = document.activeElement, busyNow = a?.isContentEditable || /INPUT|TEXTAREA|SELECT/.test(a?.tagName) || document.querySelector('dialog[open]') || BD.editing || BD.drag || busy.chat || REC.on || REC.busy || (view === 'notes' && NT.open);
     if (busyNow) return;
     clearTimeout(saveT); await push(); location.reload();
   } catch { }

@@ -1,7 +1,7 @@
 /* Forge — page rendering. State and behaviour live in app.js; the board canvas lives in board.js. */
 const PENS = ['#fcd34d', '#2563eb', '#34d399', '#fb7185', '#a78bfa', '#f97316'];
-const VIEW_NAMES = { today: 'Today', tasks: 'Tasks', board: 'Board', progress: 'Progress', settings: 'Settings' };
-const GAP = '<div class="gap" aria-hidden="true"></div>';
+const VIEW_NAMES = { today: 'Today', tasks: 'Tasks', board: 'Board', notes: 'Notes', progress: 'Progress', settings: 'Settings' };
+const GAP = '<div class="gap" aria-hidden="true"><i class="gap-fill"></i></div>';
 const UNDERLINE = '<svg class="pen-ul" viewBox="0 0 200 12" preserveAspectRatio="none" aria-hidden="true"><path d="M3 4 C45 1, 95 6, 197 2"/><path d="M8 9 C60 6, 125 11, 192 7"/></svg>';
 /* one icon set (Lucide geometry), one stroke weight, one size — never text glyphs as icons */
 const IC_PATHS = {
@@ -41,6 +41,10 @@ function section(title, count, note, body, aside = '') {
 }
 const pageHead = (kicker, title) => `<header class="phead"><p>${kicker}</p><h1>${title}</h1></header>`;
 const areaDot = k => `<i class="dot" style="background:${(AREAS[k] || AREAS.life).color}"></i>`;
+/* every project gets a colour: the one picked for it, or a stable one from its id */
+const PROJ_COLORS = ['#60a5fa', '#a78bfa', '#f472b6', '#fb923c', '#facc15', '#4ade80', '#2dd4bf', '#f87171'];
+const projColor = p => p.color || PROJ_COLORS[[...String(p.id)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % PROJ_COLORS.length];
+const projChip = p => `<span class="pchip" style="--pc:${projColor(p)}"><i></i>${esc(p.name)}</span>`;
 const shortDate = v => new Date(typeof v === 'string' ? v + 'T00:00' : v).toLocaleDateString([], { day: 'numeric', month: 'short' });
 const longDate = k => new Date(k + 'T00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
 const dur = ms => { const m = Math.max(0, Math.round(ms / 6e4)), h = Math.floor(m / 60); return h ? `${h}h ${m % 60}m` : `${m}m`; };
@@ -52,11 +56,11 @@ function taskRow(t) {
   const starred = t.top3 === td;
   const due = !t.due ? '' : t.due < td && !t.done ? `<span class="pill red">overdue · ${shortDate(t.due)}</span>`
     : `<span class="mono">${t.due === td ? 'today' : t.due === addDays(td, 1) ? 'tomorrow' : shortDate(t.due)}</span>`;
-  return `<div class="task ${t.done ? 'done' : ''}">
+  return `<div class="task ${t.done ? 'done' : ''}${p ? ' in-proj' : ''}"${p ? ` style="--pc:${projColor(p)}"` : ''}>
     <button class="check" data-act="toggleDone" data-id="${t.id}" aria-label="${t.done ? 'Reopen' : 'Complete'} ${esc(t.title)}">${ic('check', 12)}</button>
     <div class="t-body" data-act="editTask" data-id="${t.id}">
       <div class="t-title">${esc(t.title)}</div>
-      <div class="meta"><span>${areaDot(t.area)}${a.label}</span>${p ? `<span>${esc(p.name)}</span>` : ''}${due}${t.priority === 'high' ? '<span class="fg">high priority</span>' : ''}${starred && !t.done ? `<span class="star">${ic('starFill', 12)}top 3</span>` : ''}</div>
+      <div class="meta"><span>${areaDot(t.area)}${a.label}</span>${p ? projChip(p) : ''}${t.noteId && noteById(t.noteId) ? `<button class="nt-from" data-act="ntOpen" data-id="${t.noteId}" title="Open the note this came from">${ic('note', 11)}${esc((noteById(t.noteId).title || 'note').slice(0, 30))}</button>` : ''}${due}${t.priority === 'high' ? '<span class="fg">high priority</span>' : ''}${starred && !t.done ? `<span class="star">${ic('starFill', 12)}top 3</span>` : ''}</div>
     </div>
     ${t.done ? '' : `<div class="t-tools">
       <button class="icon" data-act="focusTask" data-id="${t.id}" title="Start a focus session on this" aria-label="Focus on this">${ic('play', 12)}</button>
@@ -358,7 +362,7 @@ function viewToday() {
       </div>
     </header>
     ${strip}${GAP}
-    <div class="split"><div class="main-col">
+      ${section('Focus', null, 'Time on the clock today, and a word from the coach.', `<div class="today-pair">${focus}${coach}</div>`)}${GAP}
       ${calendarSection()}${GAP}
       ${section('Top 3', `${three.filter(t => t.done).length}/3`, 'Three things that make today count. No more.', `<div class="list">${slots}</div>`, three.length ? '' : `<div class="hand-aside" aria-hidden="true"><span class="hand">start here</span>${ARROW}</div>`)}
       ${GAP}
@@ -367,8 +371,6 @@ function viewToday() {
       ${section('Reminders', rems.length, 'They fire while Forge is open.', `${rems.length ? `<div class="list">${rems.map(r => `<div class="rem"><time>${dkey(r.at) === tk ? 'today' : shortDate(r.at)} · ${fmtTime(r.at)}</time><span>${esc(r.text)}</span><button class="icon" data-act="delReminder" data-id="${r.id}" aria-label="Delete reminder">${ic('x')}</button></div>`).join('')}</div>` : ''}
         <form data-form="reminder" class="rem-form" ${rems.length ? '' : 'style="margin-top:0"'}><input type="text" name="text" placeholder="Remind me to…" aria-label="Reminder" required><input type="datetime-local" name="at" aria-label="When" required><button class="btn">Set</button></form>`)}
       ${GAP}
-    </div>
-    <aside class="sidebar"><div class="sidebar-in">${focus}${coach}</div></aside></div>
   </div>`;
 }
 
@@ -379,11 +381,12 @@ function viewTasks() {
   const index = `<div style="margin-top:22px">
     <button class="idx ${!f.project ? 'on' : ''}" data-act="filterProject" data-id="">All tasks<span class="n">${openTasks().length}</span></button>
     ${S.projects.map(p => { const all = S.tasks.filter(t => t.projectId === p.id), done = all.filter(t => t.done).length;
-      return `<button class="idx ${f.project === p.id ? 'on' : ''}" data-act="filterProject" data-id="${p.id}" title="${p.deadline ? 'Deadline ' + shortDate(p.deadline) : 'No deadline'}">${areaDot(p.area)}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span><span class="n">${done}/${all.length}</span><span class="x" data-act="delProject" data-id="${p.id}" title="Delete project">${ic('x', 12)}</span></button>`; }).join('')}
+      return `<button class="idx ${f.project === p.id ? 'on' : ''}" data-act="filterProject" data-id="${p.id}" title="${p.deadline ? 'Deadline ' + shortDate(p.deadline) : 'No deadline'}"><i class="pdot" style="--pc:${projColor(p)}" data-act="cycleProjColor" data-id="${p.id}" title="Change colour"></i><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span><span class="n">${done}/${all.length}</span><span class="x" data-act="delProject" data-id="${p.id}" title="Delete project">${ic('x', 12)}</span></button>`; }).join('')}
     <form data-form="project" class="proj-form">
       <input type="text" name="name" placeholder="New project…" aria-label="Project name" required>
       <select name="area" aria-label="Area">${Object.entries(AREAS).map(([k, a]) => `<option value="${k}">${a.label}</option>`).join('')}</select>
       <input type="date" name="deadline" title="Deadline (optional)" aria-label="Deadline">
+      <div class="pswatches" role="radiogroup" aria-label="Colour">${PROJ_COLORS.map((c, i) => `<label style="--pc:${c}"><input type="radio" name="color" value="${c}" ${i === S.projects.length % PROJ_COLORS.length ? 'checked' : ''}><i></i></label>`).join('')}</div>
       <button class="btn" style="justify-content:center">Add project</button>
     </form></div>`;
   const body = `${inlineAdd('quickTask', 'quickTasks', 'Add a task and press Enter…')}
@@ -492,7 +495,7 @@ function viewSettings() {
 }
 
 /* ---------------- render + nav indicator ---------------- */
-const VIEWS = { today: viewToday, tasks: viewTasks, board: () => boardView(), progress: viewProgress, settings: viewSettings };
+const VIEWS = { today: viewToday, tasks: viewTasks, board: () => boardView(), notes: () => notesView(), progress: viewProgress, settings: viewSettings };
 function moveIndicator(to) {
   const nav = $('#nav'), cur = nav.querySelector('[aria-current]'), el = to || cur, ind = $('#navInd');
   if (!el) return;
@@ -508,11 +511,17 @@ function render() {
   if (view === 'board') {
     if (!$('#bd')) { main.innerHTML = boardView(); bdMount(); } else bdRepaint();
     shownView = view;
+  } else if (view === 'notes' && NT.open && $('#ntEd') && noteById(NT.open)) {
+    // an open note is never repainted under the cursor: it keeps its own DOM until it closes
+    shownView = view;
   } else {
     if (BD.editing) BD.editing = null;
+    const wasNote = main.querySelector('.nt-page') ? 'note' : shownView;
     main.innerHTML = VIEWS[view]();
-    if (shownView !== view) { shownView = view; main.firstElementChild.classList.add('enter'); }
+    const now = view === 'notes' && NT.open ? 'note' : view;
+    if (wasNote !== now || shownView !== view) { shownView = view; main.firstElementChild.classList.add('enter'); }
     if (view === 'today') paintClock(true);
+    if (view === 'notes' && NT.open) ntMount();
   }
   document.querySelectorAll('#nav [data-view]').forEach(b => b.dataset.view === view ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
   moveIndicator();
@@ -531,6 +540,8 @@ function palBuild(q) {
     { g: 'Create', label: `Add task “${s}”`, hint: 'task', run: () => { const p = parseQuick(s); if (p.title) { addTask({ title: p.title, area: p.area, priority: p.priority, due: p.due }); toast('Task added.'); commit(); } } },
     { g: 'Create', label: `Put “${s}” on the board`, hint: 'board', run: () => { bdAddText(s); toast('On the board.'); commit(); } },
     { g: 'Create', label: 'Ask the coach about this', hint: 'coach', run: () => { openAgent(); sendChat(s); } });
+  items.push(...ntPalette(s, lq));
+  if (!s) items.push({ g: 'Create', label: 'New note', hint: 'N', run: () => ntStart() });
   Object.entries(VIEW_NAMES).filter(([, n]) => !lq || n.toLowerCase().includes(lq)).forEach(([k, n]) => items.push({ g: 'Go to', label: n, hint: 'page', run: () => ACT.view({ dataset: { view: k } }) }));
   const cmds = [
     !S.timer && { label: `Start a ${Number(S.profile.focusMin) || 25} minute focus session`, run: () => { startTimer(top3().find(t => !t.done)?.id, 'focus'); view = 'today'; commit(); } },
@@ -569,7 +580,11 @@ function initViewLayer() {
 
 /* ---------------- actions owned by the view layer (merged into ACT by app.js) ---------------- */
 const EXTRA_ACT = {
-  view: el => { if (BD.editing) bdStopEdit(); view = el.dataset.view; scrollTo({ top: 0, behavior: 'instant' }); render(); if (view === 'settings') loadSys(); },
+  view: el => {
+    if (BD.editing) bdStopEdit();
+    // leaving a note saves it; pressing Notes again while one is open goes back to the grid
+    if (NT.open) { if (view === 'notes' && el.dataset.view === 'notes') return ntClose(); ntFlush(); ntHideTool(); ntSlashClose(); }
+    view = el.dataset.view; scrollTo({ top: 0, behavior: 'instant' }); render(); if (view === 'settings') loadSys(); },
   theme: el => { S.profile.theme = el.dataset.v || ((S.profile.theme || 'dark') === 'dark' ? 'light' : 'dark'); commit(); },
   pen: el => { S.profile.pen = el.dataset.c; commit(); },
   palette: () => { const d = $('#palette'); if (d.open) return d.close(); $('#palInput').value = ''; palItems = palBuild(''); palSel = 0; palPaint(); d.showModal(); },

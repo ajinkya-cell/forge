@@ -1,7 +1,7 @@
 // Forge's offline layer. The app's own files: network first (so updates show up at once), the saved copy when offline.
 // Board images and files: saved after the first view, so they show offline too. The API is never cached.
-const APP = 'forge-app-v1', FILES = 'forge-files-v1';
-const SHELL = ['/', '/index.html', '/styles.css', '/apple.css', '/views.js', '/board.js', '/timer.js', '/coach.js', '/cloud.js', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+const APP = 'forge-app-v3', FILES = 'forge-files-v1';
+const SHELL = ['/', '/index.html', '/styles.css', '/ink.css', '/views.js', '/board.js', '/notes.js', '/timer.js', '/coach.js', '/cloud.js', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(APP).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

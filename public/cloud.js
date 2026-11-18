@@ -19,7 +19,7 @@ const postJson = async (url, body) => {
 };
 
 /* ---------------- sync: one row per item, newer edit wins ---------------- */
-const SYNC_KINDS = ['projects', 'tasks', 'board', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat'];
+const SYNC_KINDS = ['projects', 'tasks', 'board', 'notes', 'sessions', 'xpEvents', 'reminders', 'memory', 'chat'];
 const SYNC_KV = ['profile', 'boardCam', 'briefs', 'bonus', 'timer', 'cycle', 'chatUnread'];
 const h32 = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + '.' + s.length.toString(36); };
 // cursor: last server change seen. base: what each item looked like when last synced (a hash).
@@ -101,6 +101,7 @@ function syncApply(rows, sent) {
   if (!changed) return;
   if (S.board.some(b => !b.kind)) S.board = migrateBoard(S.board);
   try { localStorage.setItem('forge:data', JSON.stringify(S)); } catch { }
+  ntIncoming(); // an open note shows what arrived, unless it is being typed in
   softRender();
 }
 // Repaint with what arrived, but never under someone's fingers.
@@ -108,6 +109,8 @@ function softRender() {
   clearTimeout(renderLater);
   const a = document.activeElement, busyNow = a?.isContentEditable || /INPUT|TEXTAREA|SELECT/.test(a?.tagName) || document.querySelector('dialog[open]') || BD.editing || BD.drag || busy.chat || REC.on;
   if (busyNow) { renderLater = setTimeout(softRender, 1500); return; }
+  // an open note keeps its own page (render() leaves it alone); the grid and other pages repaint as usual
+  if (view === 'notes' && NT.open && $('#ntEd')) return;
   render();
 }
 
@@ -203,9 +206,9 @@ async function cxSubmit(f) {
   if (kind === 'images') body.cloudinary = f.cloudinary.value.trim();
   if (kind === 'coach') { body.apiKey = f.apiKey.value.trim(); if (f.model) body.model = f.model.value.trim(); }
   if (kind === 'voice') body.groqKey = f.groqKey.value.trim();
-  msg.className = 'cx-msg'; msg.textContent = 'Checking…'; btn.disabled = true;
+  msg.className = 'cx-msg'; msg.textContent = 'Checking…';
   try {
-    const j = await postJson('/api/setup/' + kind, body);
+    const j = await withBusy(btn, () => postJson('/api/setup/' + kind, body));
     f.querySelectorAll('input[type=password], textarea').forEach(i => i.value = '');
     msg.className = 'cx-msg ok';
     msg.textContent = { db: `Connected. ${j.items ? j.items + ' items already there.' : 'Empty and ready.'}`, images: `Works: a private test image went up, came back and was deleted (${j.cloud}).`, coach: `Key works. ${j.models} models available.`, voice: 'Key works. Whisper is ready.' }[kind];
@@ -214,17 +217,17 @@ async function cxSubmit(f) {
     const keep = msg.textContent;
     if (!$('#gate').hidden) paintSetup(); else render();
     const again = document.querySelector(`[data-form="cx"][data-kind="${kind}"] .cx-msg`); if (again) { again.className = 'cx-msg ok'; again.textContent = keep; }
-  } catch (e) { msg.className = 'cx-msg err'; msg.textContent = e.message; btn.disabled = false; }
+  } catch (e) { msg.className = 'cx-msg err'; msg.textContent = e.message; shake(f); }
 }
 
 const CLOUD_FORMS = {
   login: async f => {
-    const err = $('#gateErr'), b = f.querySelector('button'); b.disabled = true; err.textContent = '';
+    const err = $('#gateErr'), b = f.querySelector('button'); err.textContent = '';
     try {
-      await postJson('/api/login', { passphrase: f.passphrase.value });
+      await withBusy(b, () => postJson('/api/login', { passphrase: f.passphrase.value }));
       await refreshSession();
       if (CLOUD.setup.done) { hideGate(); startCloudApp(); } else { SETUP.step = 0; paintSetup(); }
-    } catch (e) { err.textContent = e.message; b.disabled = false; f.passphrase.select(); }
+    } catch (e) { err.textContent = e.message; shake(f.passphrase); f.passphrase.select(); }
   },
   setupYou: f => {
     SETUP.profile = { name: f.name.value.trim(), focusMin: Math.min(240, Math.max(5, Number(f.focusMin.value) || 50)), goalHours: Math.min(16, Math.max(1, Number(f.goalHours.value) || 4)), eveningHour: Math.min(23, Math.max(0, Number(f.eveningHour.value) || 21)) };
@@ -236,15 +239,17 @@ const CLOUD_ACT = {
   setupNext: () => { SETUP.step = Math.min(5, SETUP.step + 1); paintSetup(); },
   setupBack: () => { SETUP.step = Math.max(0, SETUP.step - 1); paintSetup(); },
   setupFinish: async el => {
-    el.disabled = true;
-    try { await postJson('/api/setup/done'); await refreshSession(); hideGate(); startCloudApp(); }
-    catch (e) { $('#gateErr').textContent = e.message; el.disabled = false; }
+    try { await withBusy(el, () => postJson('/api/setup/done')); await refreshSession(); hideGate(); startCloudApp(); }
+    catch (e) { $('#gateErr').textContent = e.message; }
   },
   cxRemove: async el => {
     if (!confirm(`Remove the ${el.dataset.what === 'coach' ? 'coach' : 'voice'} key from this Forge?`)) return;
     try { await postJson('/api/setup/remove', { what: el.dataset.what }); await refreshSession(); CFG = await fetch('/api/config').then(r => r.json()); render(); toast('Key removed.'); } catch (e) { toast(e.message); }
   },
-  syncNowBtn: async () => { await syncNow(); toast(offline ? "Couldn't reach your Forge. Changes are kept on this device." : 'Synced.'); },
+  syncNowBtn: async el => {
+    await withBusy(el, async () => { await syncNow(); if (offline) throw new Error('offline'); }).catch(() => { });
+    toast(offline ? "Couldn't reach your Forge. Changes are kept on this device." : 'Synced.');
+  },
   logout: async () => {
     if (!confirm('Log out on this device? Your data stays in your cloud.')) return;
     await syncNow();
@@ -316,7 +321,7 @@ function connectHtml() {
       ${snippet('VS Code (.vscode/mcp.json)', JSON.stringify({ servers: { forge: { type: 'http', url, headers: { Authorization: 'Bearer ' + tok } } } }, null, 2))}
       <div class="row"><button type="button" class="btn sm" data-act="hideToken">I've saved it</button></div>
     </div>` : '';
-  const list = (items, empty, row) => items.length ? `<ul class="ai-list">${items.map(row).join('')}</ul>` : `<p class="small subtle">${empty}</p>`;
+  const list = (items, empty, row) => items.length ? `<ul class="ai-list">${items.map(row).join('')}</ul>` : empty == null ? `<ul class="ai-list" aria-busy="true">${'<li><span class="skel" style="width:46%"></span><span class="skel" style="width:64px"></span></li>'.repeat(2)}</ul>` : `<p class="small subtle">${empty}</p>`;
   return `<div class="ai">
     <div class="ai-url"><span class="small">Your Forge's AI address</span><div class="ai-tok"><code>${esc(url)}</code>${copyBtn(url)}</div></div>
     <div class="ai-cards">
@@ -332,12 +337,12 @@ function connectHtml() {
     </div>
     ${fresh}
     <h4 class="ai-h">Connected</h4>
-    ${list([...C.apps.map(a => ({ ...a, kind: 'app' })), ...C.tokens.map(t => ({ ...t, kind: 'token' }))], C.loaded ? 'Nothing connected yet.' : 'Loading…', x => `<li>
+    ${list([...C.apps.map(a => ({ ...a, kind: 'app' })), ...C.tokens.map(t => ({ ...t, kind: 'token' }))], C.loaded ? 'Nothing connected yet.' : null, x => `<li>
       <span><b>${esc(x.kind === 'app' ? x.app : x.name)}</b> <span class="pill">${x.scope === 'read' ? 'only read' : 'read and change'}</span><br>
       <span class="small subtle">${x.kind === 'app' ? `signed in · sends to ${esc(x.host)}` : `token · last used ${agoText(x.last)}`}</span></span>
       <button type="button" class="ghost" data-act="${x.kind === 'app' ? 'aiDisconnect' : 'aiRevoke'}" data-id="${esc(x.id)}">${x.kind === 'app' ? 'Disconnect' : 'Revoke'}</button></li>`)}
     <h4 class="ai-h">What AI apps changed</h4>
-    ${list(C.activity.slice(0, 15), 'No changes from AI apps yet.', x => `<li class="${x.undone ? 'undone' : ''}">
+    ${list(C.activity.slice(0, 15), C.loaded ? 'No changes from AI apps yet.' : null, x => `<li class="${x.undone ? 'undone' : ''}">
       <span><b>${esc(x.client || 'AI app')}</b> · ${esc(x.summary || x.tool)}<br><span class="small subtle">${agoText(x.at)}</span></span>
       ${x.undone ? '<span class="small subtle">undone</span>' : `<button type="button" class="ghost" data-act="aiUndo" data-id="${x.id}">Undo</button>`}</li>`)}
     <p class="small subtle">AI apps never see your Neon, Cloudinary, NVIDIA or Groq keys. Anything they write in tasks or notes is treated as your data, and deleting needs your OK in the chat.</p>
@@ -346,22 +351,28 @@ function connectHtml() {
 Object.assign(CLOUD_FORMS, {
   aiToken: async f => {
     try {
-      const j = await postJson('/api/tokens', { name: f.name.value, scope: f.scope.value });
+      const j = await withBusy(f.querySelector('button'), () => postJson('/api/tokens', { name: f.name.value, scope: f.scope.value }));
       CONNECT.fresh = j; f.reset(); await loadConnect(); render();
       document.querySelector('.ai-fresh')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    } catch (e) { toast(e.message); }
+    } catch (e) { toast(e.message); shake(f); }
   },
 });
 const apiDelete = async url => { const r = await fetch(url, { method: 'DELETE' }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'That did not work.'); };
 Object.assign(CLOUD_ACT, {
-  copyText: async el => { try { await navigator.clipboard.writeText(el.dataset.text); toast('Copied.'); } catch { toast('Copy failed: select the text and copy it.'); } },
+  // the button itself says it worked: no toast for something you can see happen
+  copyText: async el => {
+    try {
+      await navigator.clipboard.writeText(el.dataset.text);
+      const was = el.dataset.label ??= el.textContent; el.textContent = 'Copied'; flash(el, 'did-ok', 1400);
+      clearTimeout(el._t); el._t = setTimeout(() => { el.textContent = was; }, 1400);
+    } catch { toast('Copy failed: select the text and copy it.'); shake(el); }
+  },
   hideToken: () => { CONNECT.fresh = null; render(); },
   aiRevoke: async el => { if (!confirm('Revoke this token? Apps using it stop working within a minute.')) return; try { await apiDelete('/api/tokens/' + el.dataset.id); if (CONNECT.fresh?.id === el.dataset.id) CONNECT.fresh = null; await loadConnect(); toast('Revoked.'); } catch (e) { toast(e.message); } },
   aiDisconnect: async el => { if (!confirm('Disconnect this app from your Forge?')) return; try { await apiDelete('/api/apps/' + encodeURIComponent(el.dataset.id)); await loadConnect(); toast('Disconnected.'); } catch (e) { toast(e.message); } },
   aiUndo: async el => {
-    el.disabled = true;
-    try { const j = await postJson('/api/activity/undo', { id: Number(el.dataset.id) }); toast('Undone: ' + j.summary); await syncNow(); await loadConnect(); }
-    catch (e) { toast(e.message); el.disabled = false; }
+    try { const j = await withBusy(el, () => postJson('/api/activity/undo', { id: Number(el.dataset.id) })); toast('Undone: ' + j.summary); await syncNow(); await loadConnect(); }
+    catch (e) { toast(e.message); }
   },
 });
 function paintSyncLine() { const el = $('#syncLine'); if (el) el.textContent = syncLineText(); }
@@ -375,7 +386,7 @@ function cloudSettings() {
     </div>`;
   const data = `<div class="set">
       <label>Sync</label><div class="row" style="flex-wrap:wrap"><span class="small fg" id="syncLine">${esc(syncLineText())}</span><button class="btn sm" data-act="syncNowBtn">Sync now</button></div>
-      <label>Using</label><div class="mono small fg">${st ? `${st.items ?? '?'} items in Neon${st.files ? ` · ${st.files.count} file${st.files.count === 1 ? '' : 's'}, ${fmtBytes(st.files.bytes)} in Cloudinary (${Math.round(st.files.credits * 10) / 10} of ${st.files.limit} free credits this month)` : ''}` : '…'}</div>
+      <label>Using</label><div class="mono small fg">${st ? `${st.items ?? '?'} items in Neon${st.files ? ` · ${st.files.count} file${st.files.count === 1 ? '' : 's'}, ${fmtBytes(st.files.bytes)} in Cloudinary (${Math.round(st.files.credits * 10) / 10} of ${st.files.limit} free credits this month)` : ''}` : '<span class="skel" style="width:220px"></span>'}</div>
       <label>Safety net</label><p class="small">Every night your Forge saves a copy of everything into your Cloudflare KV storage and keeps the last 30${st ? ` (${st.backups} now)` : ''}. Each device also keeps its own copy, so it works offline.</p>
       <label>Move it</label><div class="row"><button class="btn" data-act="export">Export backup</button><label class="btn" style="cursor:pointer">Import backup<input type="file" id="importFile" accept="application/json" hidden></label></div>
       <label>This device</label><div><button class="btn" data-act="logout">Log out</button></div>
